@@ -21,6 +21,12 @@ class DeafenAFK(commands.Cog):
         # Pending move tasks
         self._tasks: dict[tuple[int, int], asyncio.Task] = {}
 
+        # Anti-race token per user
+        self._nonce: dict[tuple[int, int], int] = {}
+
+        # Guard against reacting to our own moves
+        self._moving: set[tuple[int, int]] = set()
+
     # ---------- settings ----------
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
@@ -58,75 +64,107 @@ class DeafenAFK(commands.Cog):
         await ctx.send(f"Delay set to `{seconds}s`")
 
     # ---------- helpers ----------
-    def _cancel_task(self, guild_id: int, member_id: int):
-        key = (guild_id, member_id)
+    def _key(self, member: discord.Member) -> tuple[int, int]:
+        return (member.guild.id, member.id)
+
+    def _bump_nonce(self, key: tuple[int, int]) -> int:
+        self._nonce[key] = self._nonce.get(key, 0) + 1
+        return self._nonce[key]
+
+    def _cancel_task(self, key: tuple[int, int]):
         task = self._tasks.pop(key, None)
         if task and not task.done():
             task.cancel()
 
-    def _clear_return(self, guild_id: int, member_id: int):
-        self._return_to.pop((guild_id, member_id), None)
+    def _clear_return(self, key: tuple[int, int]):
+        self._return_to.pop(key, None)
 
     async def _get_target_afk(self, guild: discord.Guild) -> discord.VoiceChannel | None:
         channel_id = await self.config.guild(guild).channel_id()
         target = guild.get_channel(channel_id) if channel_id else guild.afk_channel
         return target if isinstance(target, discord.VoiceChannel) else None
 
-    async def _move_to_afk_if_still_self_deaf(self, member: discord.Member):
-        if not await self.config.guild(member.guild).enabled():
-            return
-        if not member.voice or not member.voice.channel:
-            return
-        if not member.voice.self_deaf:
-            return
-
-        target = await self._get_target_afk(member.guild)
-        if not target:
-            return
-        if member.voice.channel.id == target.id:
-            return
-
-        # store where to return them
-        self._return_to[(member.guild.id, member.id)] = member.voice.channel.id
-
+    async def _safe_move(self, member: discord.Member, channel: discord.VoiceChannel, reason: str) -> bool:
+        key = self._key(member)
+        self._moving.add(key)
         try:
-            await member.move_to(target, reason="Self-deafen -> AFK")
+            await member.move_to(channel, reason=reason)
+            return True
         except (discord.Forbidden, discord.HTTPException):
-            self._clear_return(member.guild.id, member.id)
+            return False
+        finally:
+            # tiny delay so the voice cache updates before we process next event
+            await asyncio.sleep(0.2)
+            self._moving.discard(key)
 
-    async def _move_back_if_needed(self, member: discord.Member):
+    async def _maybe_return(self, member: discord.Member):
+        """If member is in AFK target, not self-deaf, and we have a return channel saved -> move them back."""
+        key = self._key(member)
+
         if not member.voice or not member.voice.channel:
             return
 
         target = await self._get_target_afk(member.guild)
         if not target:
-            self._clear_return(member.guild.id, member.id)
+            self._clear_return(key)
             return
 
-        # only move back if they're currently in the AFK target VC
         if member.voice.channel.id != target.id:
             return
 
-        key = (member.guild.id, member.id)
+        # Only return if they're NOT self-deaf anymore
+        if member.voice.self_deaf:
+            return
+
         return_id = self._return_to.get(key)
         if not return_id:
             return
 
         return_chan = member.guild.get_channel(return_id)
         if not isinstance(return_chan, discord.VoiceChannel):
-            self._clear_return(*key)
+            self._clear_return(key)
             return
 
-        if return_chan.id == target.id:
-            self._clear_return(*key)
+        ok = await self._safe_move(member, return_chan, "Undeafen -> return to previous VC")
+        self._clear_return(key)  # clear either way to avoid loops
+
+        return ok
+
+    async def _move_to_afk_if_still_self_deaf(self, member: discord.Member, expected_nonce: int):
+        key = self._key(member)
+
+        # kill stale tasks
+        if self._nonce.get(key, 0) != expected_nonce:
             return
 
-        try:
-            await member.move_to(return_chan, reason="Undeafen -> return to previous VC")
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        finally:
-            self._clear_return(*key)
+        if not await self.config.guild(member.guild).enabled():
+            return
+
+        if not member.voice or not member.voice.channel:
+            return
+
+        # Only trigger on SELF deafen
+        if not member.voice.self_deaf:
+            return
+
+        target = await self._get_target_afk(member.guild)
+        if not target:
+            return
+
+        # already there
+        if member.voice.channel.id == target.id:
+            return
+
+        # remember where to return
+        self._return_to[key] = member.voice.channel.id
+
+        ok = await self._safe_move(member, target, "Self-deafen -> AFK")
+        if not ok:
+            self._clear_return(key)
+            return
+
+        # If by the time they're in AFK they're not self-deaf anymore, bounce them back immediately
+        await self._maybe_return(member)
 
     # ---------- listener ----------
     @commands.Cog.listener()
@@ -137,50 +175,44 @@ class DeafenAFK(commands.Cog):
         if not await self.config.guild(member.guild).enabled():
             return
 
-        key = (member.guild.id, member.id)
-        target = await self._get_target_afk(member.guild)
+        key = self._key(member)
 
-        # left VC -> cleanup
-        if after.channel is None:
-            self._cancel_task(*key)
-            self._clear_return(*key)
+        # ignore events caused by our own moves
+        if key in self._moving:
             return
 
-        # Channel changed (includes bot moving them)
-        if before.channel and after.channel and before.channel.id != after.channel.id:
-            # If they got moved INTO the AFK target AND we already saved a return channel,
-            # that's expected -> keep the return mapping.
-            if target and after.channel.id == target.id and key in self._return_to:
-                pass
-            else:
-                # Otherwise, treat it as a user moving around -> cleanup.
-                self._cancel_task(*key)
-                self._clear_return(*key)
+        # left voice -> cleanup
+        if after.channel is None:
+            self._bump_nonce(key)
+            self._cancel_task(key)
+            self._clear_return(key)
+            return
+
+        # If they're sitting in AFK and not self-deaf, always try to return (covers weird ordering)
+        await self._maybe_return(member)
 
         prev_self_deaf = bool(before.self_deaf)
         now_self_deaf = bool(after.self_deaf)
 
-        # If they JOIN a VC already self-deafened, also trigger
-        if before.channel is None and after.channel is not None and now_self_deaf:
-            prev_self_deaf = False  # force trigger below
-
         # self-deafen => schedule move to AFK
         if not prev_self_deaf and now_self_deaf:
-            self._cancel_task(*key)
+            self._cancel_task(key)
+            nonce = self._bump_nonce(key)
             delay = await self.config.guild(member.guild).delay()
 
             async def runner():
                 try:
                     if delay:
                         await asyncio.sleep(delay)
-                    await self._move_to_afk_if_still_self_deaf(member)
+                    await self._move_to_afk_if_still_self_deaf(member, nonce)
                 finally:
                     self._tasks.pop(key, None)
 
             self._tasks[key] = asyncio.create_task(runner())
             return
 
-        # undeafen => move back (if we previously moved them)
+        # undeafen => cancel pending (and maybe_return already handles moving back)
         if prev_self_deaf and not now_self_deaf:
-            self._cancel_task(*key)
-            await self._move_back_if_needed(member)
+            self._bump_nonce(key)
+            self._cancel_task(key)
+            await self._maybe_return(member)
