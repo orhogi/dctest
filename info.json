@@ -1,0 +1,6 @@
+{
+  "author": ["cote"],
+  "short": "Personal Red cogs",
+  "description": "My custom Red-DiscordBot cogs.",
+  "install_msg": "Repo added. Install with: [p]cog install <repo> <cog>"
+}
