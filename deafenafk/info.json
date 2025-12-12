@@ -1,0 +1,11 @@
+{
+  "name": "deafenafk",
+  "author": ["cote"],
+  "short": "Auto-move self-deafened users to AFK, then move them back when they undeafen.",
+  "description": "Moves users to a configured AFK VC when they self-deafen. When they undeafen, moves them back to the VC they were in before the move.",
+  "install_msg": "Loaded. Configure with: [p]deafenafkset",
+  "end_user_data_statement": "This cog stores per-user temporary voice channel IDs in memory to return users to their original voice channel. No persistent personal data is stored.",
+  "min_bot_version": "3.5.0",
+  "requirements": [],
+  "tags": ["voice", "afk", "automation"]
+}
