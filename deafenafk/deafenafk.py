@@ -4,7 +4,9 @@ from redbot.core import commands, Config
 
 
 class DeafenAFK(commands.Cog):
-    """Self-deafen => move to AFK VC. Undeafen => move back to previous VC."""
+    """Self-deafen => move to AFK VC. Undeafen => move back to previous VC.
+    Sends rich embed notis for join/leave, and a noti when the bot moves someone to AFK.
+    """
 
     def __init__(self, bot):
         self.bot = bot
@@ -118,7 +120,7 @@ class DeafenAFK(commands.Cog):
 
         allowed = discord.AllowedMentions(users=ping_user, roles=False, everyone=False)
 
-        # "silent ping" if supported by the discord.py version, else fallback
+        # "silent ping" if supported by your discord.py version; else fallback
         try:
             await chan.send(content=content, embed=embed, allowed_mentions=allowed, silent=silent)
         except TypeError:
@@ -138,7 +140,6 @@ class DeafenAFK(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return False
         finally:
-            # tiny delay so the voice cache updates before we process next event
             await asyncio.sleep(0.2)
             self._moving.discard(key)
 
@@ -171,8 +172,7 @@ class DeafenAFK(commands.Cog):
             return
 
         ok = await self._safe_move(member, return_chan, "Undeafen -> return to previous VC")
-        self._clear_return(key)  # clear either way to avoid loops
-
+        self._clear_return(key)
         return ok
 
     async def _move_to_afk_if_still_self_deaf(self, member: discord.Member, expected_nonce: int):
@@ -213,16 +213,18 @@ class DeafenAFK(commands.Cog):
         em.title = "Moved to AFK"
         em.description = f"{member.mention} had been moved to **{target.name}**."
         em.add_field(name="Reason", value="Self-deafen -> AFK", inline=False)
+        if member.display_avatar:
+            em.set_thumbnail(url=member.display_avatar.url)
 
         await self._send_notify(
             member.guild,
-            content=f"{member.mention}",   # ping them
+            content=f"{member.mention}",
             embed=em,
-            silent=True,                  # suppress push notif if supported
+            silent=True,
             ping_user=True,
         )
 
-        # If by the time they're in AFK they're not self-deaf anymore, bounce them back immediately
+        # If they undeaf instantly, bounce them back
         await self._maybe_return(member)
 
     # ---------- listener ----------
@@ -240,14 +242,7 @@ class DeafenAFK(commands.Cog):
         if key in self._moving:
             return
 
-        # left voice -> cleanup
-        if after.channel is None:
-            self._bump_nonce(key)
-            self._cancel_task(key)
-            self._clear_return(key)
-            return
-
-        # joined a VC (before none -> after some channel)
+        # JOIN noti
         if before.channel is None and after.channel is not None:
             em = self._embed_base(member.guild)
             em.title = "Voice Join"
@@ -259,7 +254,24 @@ class DeafenAFK(commands.Cog):
 
             await self._send_notify(member.guild, embed=em, silent=False, ping_user=False)
 
-        # If they're sitting in AFK and not self-deaf, always try to return (covers weird ordering)
+        # LEAVE noti + cleanup
+        if after.channel is None and before.channel is not None:
+            em = self._embed_base(member.guild)
+            em.title = "Voice Leave"
+            em.description = f"{member.mention} left **{before.channel.name}**."
+            em.add_field(name="User", value=f"{member} (`{member.id}`)", inline=False)
+            em.add_field(name="Channel", value=f"{before.channel.mention} (`{before.channel.id}`)", inline=False)
+            if member.display_avatar:
+                em.set_thumbnail(url=member.display_avatar.url)
+
+            await self._send_notify(member.guild, embed=em, silent=False, ping_user=False)
+
+            self._bump_nonce(key)
+            self._cancel_task(key)
+            self._clear_return(key)
+            return
+
+        # If they're sitting in AFK and not self-deaf, try returning (covers weird ordering)
         await self._maybe_return(member)
 
         prev_self_deaf = bool(before.self_deaf)
@@ -287,3 +299,7 @@ class DeafenAFK(commands.Cog):
             self._bump_nonce(key)
             self._cancel_task(key)
             await self._maybe_return(member)
+
+
+async def setup(bot):
+    await bot.add_cog(DeafenAFK(bot))
