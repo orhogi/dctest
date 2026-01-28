@@ -1,0 +1,10 @@
+{
+  "name": "SteamFix",
+  "author": ["you"],
+  "short": "Fix Steam Workshop embeds",
+  "description": "Posts the first workshop image when Discord fails to embed Steam links.",
+  "install_msg": "SteamFix loaded. Workshop embeds will now show images.",
+  "requirements": ["requests", "beautifulsoup4"],
+  "tags": ["steam", "embed", "workshop"],
+  "min_bot_version": "3.5.0"
+}
