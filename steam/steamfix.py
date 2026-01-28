@@ -1,3 +1,4 @@
+import asyncio
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -9,8 +10,6 @@ STEAM_WORKSHOP_REGEX = re.compile(
 )
 
 class SteamFix(commands.Cog):
-    """Fix Steam Workshop embeds by posting the first image"""
-
     def __init__(self, bot):
         self.bot = bot
 
@@ -19,12 +18,18 @@ class SteamFix(commands.Cog):
         if message.author.bot:
             return
 
-        # If Discord already embedded, do nothing
-        if message.embeds:
-            return
-
         match = STEAM_WORKSHOP_REGEX.search(message.content)
         if not match:
+            return
+
+        # ⏳ wait for Discord to *try* embedding
+        await asyncio.sleep(2)
+
+        # refetch message
+        message = await message.channel.fetch_message(message.id)
+
+        # if Discord succeeded, do nothing
+        if message.embeds:
             return
 
         url = match.group(0)
