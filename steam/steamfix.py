@@ -5,41 +5,51 @@ from bs4 import BeautifulSoup
 import discord
 from redbot.core import commands
 
-STEAM_WORKSHOP_REGEX = re.compile(
-    r"https?://steamcommunity\.com/sharedfiles/filedetails/\?id=\d+"
+STEAM_REGEX = re.compile(
+    r"https?://steamcommunity\.com/sharedfiles/filedetails/\?\S+",
+    re.IGNORECASE
 )
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Cookie": "birthtime=568022401; lastagecheckage=1-0-1990;"
+}
+
 class SteamFix(commands.Cog):
+    """Posts the first Steam Workshop image when Discord fails to embed"""
+
     def __init__(self, bot):
         self.bot = bot
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        if message.author.bot or not message.content:
             return
 
-        match = STEAM_WORKSHOP_REGEX.search(message.content)
+        match = STEAM_REGEX.search(message.content)
         if not match:
             return
 
-        # ⏳ wait for Discord to *try* embedding
+        # wait for Discord embed attempt
         await asyncio.sleep(2)
-
-        # refetch message
         message = await message.channel.fetch_message(message.id)
 
-        # if Discord succeeded, do nothing
+        # if Discord embedded successfully, do nothing
         if message.embeds:
             return
 
         url = match.group(0)
 
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(url, headers=headers, timeout=10)
+            r = requests.get(url, headers=HEADERS, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
 
-            img = soup.select_one("img.workshopItemPreviewImage")
+            img = (
+                soup.select_one("img#previewImageMain") or
+                soup.select_one("img.workshopItemPreviewImage") or
+                soup.select_one("img[src*='steamusercontent']")
+            )
+
             if not img or not img.get("src"):
                 return
 
@@ -52,8 +62,8 @@ class SteamFix(commands.Cog):
 
             await message.channel.send(embed=embed)
 
-        except Exception:
-            pass
+        except Exception as e:
+            print("SteamFix error:", e)
 
 
 async def setup(bot):
